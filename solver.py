@@ -12,16 +12,27 @@ def build_airplane_curved(genes, kind='quadratic'):
     """
     Buduje samolot z nieliniowymi (łukowatymi) przejściami między sekcjami
     dla optymalnego rozkładu siły nośnej.
+    Struktura: base (y=0) -> root -> brk1 -> brk2 -> tip
     """
-    y_root = genes['y_root'] - genes['y_root']
-    y_break = y_root + genes['y_break_f'] * (B/2 - y_root) - genes['y_root']
-    y_tip = y_break + genes['y_tip_f'] * (B/2 - y_break) - genes['y_root']
+    # Stałe dla profilu bazowego (na środku w y=0)
+    y_base = 0
+    c_base = 0.4
+    t_base = 0
+    x_base = 0
+    z_base = 0
     
-    y_pts = np.array([y_root, y_break, y_tip])
-    c_pts = np.array([genes['c_root'], genes['c_brk'], genes['c_tip']])
-    x_pts = np.array([0, genes['x_brk'], genes['x_tip']])
-    z_pts = np.array([0, genes['z_brk'], genes['z_tip']])
-    t_pts = np.array([genes['t_root'], genes['t_brk'], genes['t_tip']])
+    # Zmienne punkty przerwania
+    y_root = genes['y_root']
+    y_brk1 = y_root + genes['y_break1_f'] * (B/2 - y_root)
+    y_brk2 = y_brk1 + genes['y_break2_f'] * (B/2 - y_brk1)
+    y_tip = y_brk2 + genes['y_tip_f'] * (B/2 - y_brk2)
+    
+    # Tablice interpolacyjne (5 punktów: base, root, brk1, brk2, tip)
+    y_pts = np.array([y_base, y_root, y_brk1, y_brk2, y_tip])
+    c_pts = np.array([c_base, genes['c_root'], genes['c_brk1'], genes['c_brk2'], genes['c_tip']])
+    x_pts = np.array([x_base, genes['x_root'], genes['x_brk1'], genes['x_brk2'], genes['x_tip']])
+    z_pts = np.array([z_base, genes['z_root'], genes['z_brk1'], genes['z_brk2'], genes['z_tip']])
+    t_pts = np.array([t_base, genes['t_root'], genes['t_brk1'], genes['t_brk2'], genes['t_tip']])
 
     f_chord = interp1d(y_pts, c_pts, kind=kind)
     f_x     = interp1d(y_pts, x_pts, kind=kind)
@@ -29,25 +40,36 @@ def build_airplane_curved(genes, kind='quadratic'):
     f_t     = interp1d(y_pts, t_pts, kind=kind)
 
     num_main_sections = 10
-    y_dense = np.linspace(y_root, y_tip, num_main_sections)
+    y_dense = np.linspace(y_base, y_tip, num_main_sections)
     
     sections = []
     
-    # Pobieramy profile obiektowe
+    # Pobieramy profile obiektowe (4 profile przejściowe)
+    af_base = AIRFOIL_DATABASE[int(genes['id_root'])]  # base używa tego samego profilu co root
     af_root = AIRFOIL_DATABASE[int(genes['id_root'])]
-    af_brk  = AIRFOIL_DATABASE[int(genes['id_brk'])]
+    af_brk1 = AIRFOIL_DATABASE[int(genes['id_brk1'])]
+    af_brk2 = AIRFOIL_DATABASE[int(genes['id_brk1'])]  # brk2 używa tego samego profilu co brk1
     af_tip  = AIRFOIL_DATABASE[int(genes['id_tip'])]
 
     for i in range(len(y_dense)):
         y_val = y_dense[i]
         
-        if y_val <= y_break:
-            fraction = (y_val - y_root) / (y_break - y_root) if y_break != y_root else 0
-            # Używamy metody blend_with_another_airfoil do interpolacji
-            af = af_root.blend_with_another_airfoil(af_brk, fraction)
+        if y_val <= y_root:
+            # Interwał [y_base, y_root]
+            fraction = (y_val - y_base) / (y_root - y_base) if y_root != y_base else 0
+            af = af_base.blend_with_another_airfoil(af_root, fraction)
+        elif y_val <= y_brk1:
+            # Interwał [y_root, y_brk1]
+            fraction = (y_val - y_root) / (y_brk1 - y_root) if y_brk1 != y_root else 0
+            af = af_root.blend_with_another_airfoil(af_brk1, fraction)
+        elif y_val <= y_brk2:
+            # Interwał [y_brk1, y_brk2]
+            fraction = (y_val - y_brk1) / (y_brk2 - y_brk1) if y_brk2 != y_brk1 else 0
+            af = af_brk1.blend_with_another_airfoil(af_brk2, fraction)
         else:
-            fraction = (y_val - y_break) / (y_tip - y_break) if y_tip != y_break else 0
-            af = af_brk.blend_with_another_airfoil(af_tip, fraction)
+            # Interwał [y_brk2, y_tip]
+            fraction = (y_val - y_brk2) / (y_tip - y_brk2) if y_tip != y_brk2 else 0
+            af = af_brk2.blend_with_another_airfoil(af_tip, fraction)
 
         sections.append(
             asb.WingXSec(
@@ -59,8 +81,8 @@ def build_airplane_curved(genes, kind='quadratic'):
         )
 
     # 4. Logika Wingletu (zachowujemy Twoją sprawdzoną gładką geometrię)
-    dy = y_tip - y_break
-    dz = genes['z_tip'] - genes['z_brk']
+    dy = y_tip - y_brk2
+    dz = genes['z_tip'] - genes['z_brk2']
     wing_dihedral_rad = np.arctan2(dz, dy)
     
     target_angle_rad = np.radians(genes['winglet_target_angle'])
@@ -276,6 +298,84 @@ def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=
     return data_for_fitness, x_cg_target
 
 
+def fitness_function_weighted(data):
+    """
+    Oblicza ocenę samolotu (0-100 pkt).
+    
+    Argument 'data' musi być słownikiem zawierającym:
+    - ld (float): Doskonałość
+    - cm_cg (float): Moment trymujący przy założonym CG
+    - cma, cnb (float): Pochodne stateczności statycznej
+    - cmq, clp, cnr (float): Pochodne tłumienia dynamicznego
+    - oswald (float): Współczynnik efektywności obrysu
+    """
+    if data is None: return 0.0, 
+
+    # --- KONFIGURACJA WAG (Suma = 1.0) ---
+    weights = {
+        'w_ld':      0.40,  # Główny priorytet: osiągi
+        'w_trim':    0.15,  # Jakość trymowania (Cm_cg blisko 0)
+        'w_stab':    0.10,  # Stateczność statyczna (Cma, Cnb)
+        'w_d_pitch': 0.1,  # Tłumienie pochylania (Cmq)
+        'w_d_roll':  0.05,  # Tłumienie przechylania (Clp)
+        'w_d_yaw':   0.20,  # Tłumienie odchylania (Cnr - ważne dla wingletów)
+        'w_oswald':  0.10   # Eliptyczność (Oswald) - promuje smukłe skrzydła
+    }
+
+    # 1. DOSKONAŁOŚĆ (0-120 pkt) - liniowe skalowanie względem celu 25
+    score_ld = np.clip((np.maximum(data['ld']-10,0) / 25) * 100, 0, 120)
+
+    # 2. TRYM (0-100 pkt) - Gauss wokół Cm = 0
+    # Sigma 0.02 pozwala na nieco większą tolerancję przy mniejszej wadze
+    sigma_trim = 0.01
+    score_trim = np.exp(-(data['cm_cg']**2) / (2 * sigma_trim**2)) * 100
+
+    # 3. STATECZNOŚĆ STATYCZNA (0-100 pkt)
+    f_cma = 1 / (1 + np.exp(10 * (data['cma'] + 0.4)))
+    f_cnb = 1 / (1 + np.exp(-50 * (data['cnb'] - 0.04)))
+    score_stab = (f_cma * 0.5 + f_cnb * 0.5) * 100
+
+    # 4. TŁUMIENIE DYNAMICZNE (Rozdzielone)
+    # Każde tłumienie musi być ujemne (ujemna wartość oznacza stabilność)
+    def calc_damp_score(val, target):
+        if val > 0: return 0.0  # Kara za niestabilność dynamiczną
+        return np.clip((abs(val) / target) * 100, 0, 100)
+
+    # Wartości targetowe są przybliżone dla typowych małych UAV:
+    score_damp_pitch = calc_damp_score(data['cmq'], 4.0)
+    score_damp_roll  = calc_damp_score(data['clp'], 1.0)
+    score_damp_yaw   = calc_damp_score(data['cnr'], 0.5)
+
+    # 5. OSWALD (Bonusowy mnożnik końcowy lub waga)
+    # Traktujemy to jako modyfikator jakości osiągów
+    score_oswald = np.clip((data['oswald'] - 0.8) / 0.25 * 100, 0, 100)
+    # --- OBLICZENIE ŚREDNIEJ WAŻONEJ ---
+    final_score = (
+        score_ld         * weights['w_ld'] +
+        score_trim       * weights['w_trim'] +
+        score_stab       * weights['w_stab'] +
+        score_damp_pitch * weights['w_d_pitch'] +
+        score_damp_roll  * weights['w_d_roll'] +
+        score_damp_yaw   * weights['w_d_yaw'] +
+        score_oswald     * weights['w_oswald']
+    ) / sum(weights.values()) 
+    
+    score_details = {
+        'ld':     score_ld,
+        'trim': score_trim,
+        'stab': score_stab,
+        'd_pitch':score_damp_pitch,
+        'd_roll':score_damp_roll,
+        'd_yaw':score_damp_yaw,
+        'oswald': score_oswald
+    }
+    
+    # "Bezpiecznik" - jeśli samolot jest statycznie niestabilny, wynik drastycznie spada
+    if data['cma'] > 0 or data['cnb'] < 0:
+        final_score *= 0.15
+
+    return float(final_score), score_details
+
 
 def analyze_aerodynamics(airplane, total_mass, velocity, method='buildup'):
     """
@@ -364,87 +464,6 @@ def analyze_aerodynamics(airplane, total_mass, velocity, method='buildup'):
         print(f"Błąd analizy: {e}")
         return None
     
-
-
-def fitness_function_weighted(data):
-    """
-    Oblicza ocenę samolotu (0-100 pkt).
-    
-    Argument 'data' musi być słownikiem zawierającym:
-    - ld (float): Doskonałość
-    - cm_cg (float): Moment trymujący przy założonym CG
-    - cma, cnb (float): Pochodne stateczności statycznej
-    - cmq, clp, cnr (float): Pochodne tłumienia dynamicznego
-    - oswald (float): Współczynnik efektywności obrysu
-    """
-    if data is None: return 0.0, 
-
-    # --- KONFIGURACJA WAG (Suma = 1.0) ---
-    weights = {
-        'w_ld':      0.40,  # Główny priorytet: osiągi
-        'w_trim':    0.15,  # Jakość trymowania (Cm_cg blisko 0)
-        'w_stab':    0.10,  # Stateczność statyczna (Cma, Cnb)
-        'w_d_pitch': 0.1,  # Tłumienie pochylania (Cmq)
-        'w_d_roll':  0.05,  # Tłumienie przechylania (Clp)
-        'w_d_yaw':   0.20,  # Tłumienie odchylania (Cnr - ważne dla wingletów)
-        'w_oswald':  0.10   # Eliptyczność (Oswald) - promuje smukłe skrzydła
-    }
-
-    # 1. DOSKONAŁOŚĆ (0-120 pkt) - liniowe skalowanie względem celu 25
-    score_ld = np.clip(((np.maximum(data['ld']-10,0))**2 / 625) * 100, 0, 120)
-
-    # 2. TRYM (0-100 pkt) - Gauss wokół Cm = 0
-    # Sigma 0.02 pozwala na nieco większą tolerancję przy mniejszej wadze
-    sigma_trim = 0.01
-    score_trim = np.exp(-(data['cm_cg']**2) / (2 * sigma_trim**2)) * 100
-
-    # 3. STATECZNOŚĆ STATYCZNA (0-100 pkt)
-    f_cma = 1 / (1 + np.exp(10 * (data['cma'] + 0.4)))
-    f_cnb = 1 / (1 + np.exp(-50 * (data['cnb'] - 0.04)))
-    score_stab = (f_cma * 0.5 + f_cnb * 0.5) * 100
-
-    # 4. TŁUMIENIE DYNAMICZNE (Rozdzielone)
-    # Każde tłumienie musi być ujemne (ujemna wartość oznacza stabilność)
-    def calc_damp_score(val, target):
-        if val > 0: return 0.0  # Kara za niestabilność dynamiczną
-        return np.clip((abs(val) / target) * 100, 0, 100)
-
-    # Wartości targetowe są przybliżone dla typowych małych UAV:
-    score_damp_pitch = calc_damp_score(data['cmq'], 4.0)
-    score_damp_roll  = calc_damp_score(data['clp'], 1.0)
-    score_damp_yaw   = calc_damp_score(data['cnr'], 0.5)
-
-    # 5. OSWALD (Bonusowy mnożnik końcowy lub waga)
-    # Traktujemy to jako modyfikator jakości osiągów
-    score_oswald = np.clip((data['oswald'] - 0.8) / 0.25 * 100, 0, 100)
-    # --- OBLICZENIE ŚREDNIEJ WAŻONEJ ---
-    final_score = (
-        score_ld         * weights['w_ld'] +
-        score_trim       * weights['w_trim'] +
-        score_stab       * weights['w_stab'] +
-        score_damp_pitch * weights['w_d_pitch'] +
-        score_damp_roll  * weights['w_d_roll'] +
-        score_damp_yaw   * weights['w_d_yaw'] +
-        score_oswald     * weights['w_oswald']
-    ) / sum(weights.values()) 
-    
-    score_details = {
-        'ld':     score_ld,
-        'trim': score_trim,
-        'stab': score_stab,
-        'd_pitch':score_damp_pitch,
-        'd_roll':score_damp_roll,
-        'd_yaw':score_damp_yaw,
-        'oswald': score_oswald
-    }
-    
-    # "Bezpiecznik" - jeśli samolot jest statycznie niestabilny, wynik drastycznie spada
-    if data['cma'] > 0 or data['cnb'] < 0:
-        final_score *= 0.15
-
-    return float(final_score), score_details
-
-
 
 def calculate_extra_metrics(airplane, total_mass, velocity):
     """

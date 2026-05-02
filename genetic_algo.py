@@ -27,16 +27,23 @@ class GeneticAlgorithm:
         self.pop_size = pop_size
         self.elite_size = elite_size
         self.bounds = {
-            'y_root': (0, 0),  # Zadane z góry jako 0
-            'y_break_f': (0.2, 0.7), 'y_tip_f': (0.71, 0.95),
-            'c_root': (0.33, 0.33),  # Zadane z góry jako 0.33
-            'c_brk': (0.10, 0.25), 'c_tip': (0.05, 0.15),
-            't_root': (0.0, 0.0), 't_brk': (-2, 2), 't_tip': (-5, 5),
-            'x_brk': (0, 0.25), 'x_tip': (0.2, 0.5), 
-            'z_brk': (-0.03, 0.1), 'z_tip': (0, 0.15), 'winglet_target_angle': (45, 90),
-            'h_w': (0.05, 0.15), 'R_w': (0.02, 0.1), 'c_w_end': (0.01, 0.07),
-            'sweep_w': (0, 0.1), 'toe': (-5, 5),
-            'id_root': (0, len(AIRFOIL_DATABASE)-1), 'id_brk': (0, len(AIRFOIL_DATABASE)-1),
+            # Zmienne punkty Y
+            'y_root': (0, 0.2),
+            'y_break1_f': (0.2, 0.7), 'y_break2_f': (0.3, 0.7), 'y_tip_f': (0.71, 0.95),
+            # Cięciwa
+            'c_root': (0.2, 0.4), 'c_brk1': (0.09, 0.35), 'c_brk2': (0.05, 0.3), 'c_tip': (0.03, 0.25),
+            # Skręcenie
+            't_root': (-1.0, 1.0), 't_brk1': (-2, 2), 't_brk2': (-2, 3), 't_tip': (-5, 5),
+            # Pozycja X (sweep)
+            'x_root': (0, 0.24), 'x_brk1': (0, 0.7), 'x_brk2': (0.1, 0.99), 'x_tip': (0.2, 1), 
+            # Pozycja Z (dihedral)
+            'z_root': (-0.03, 0.1), 'z_brk1': (-0.06, 0.15), 'z_brk2': (-0.03, 0.24), 'z_tip': (0, 0.25), 
+            # Winglet
+            'winglet_target_angle': (45, 90),
+            'h_w': (0.01, 0.15), 'R_w': (0.02, 0.1), 'c_w_end': (0.01, 0.09),
+            'sweep_w': (0, 0.3), 'toe': (-5, 5),
+            # Profile (indeksy do AIRFOIL_DATABASE)
+            'id_root': (0, len(AIRFOIL_DATABASE)-1), 'id_brk1': (0, len(AIRFOIL_DATABASE)-1),
             'id_tip': (0, len(AIRFOIL_DATABASE)-1), 'id_w': (0, len(AIRFOIL_DATABASE)-1)
         }
 

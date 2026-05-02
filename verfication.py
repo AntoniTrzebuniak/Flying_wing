@@ -1,7 +1,7 @@
 from solver import *
 from consts import TARGET_VELOCITY
 test_genes ={
-               "y_root": 0.0,
+        "y_root": 0.0,
         "y_break_f": 0.2855583796117732,
         "y_tip_f": 0.95,
         "c_root": 0.33,
