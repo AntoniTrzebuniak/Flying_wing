@@ -227,10 +227,30 @@ def build_airplane(genes):
 
 import numpy as numpy
 
-def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=0, sm_target=0.08):
+
+def _find_alpha_for_cm_zero(alpha_range, cm):
     """
-    Wykonuje wektoryzowaną analizę AeroBuildup i przygotowuje skorygowane dane 
-    dla funkcji fitness w punkcie najlepszego L/D.
+    Znajduje kąt natarcia, gdzie Cm=0.
+    Zwraca: (alpha_trim, idx_trim) - tuple zawierający wartość kąta i jego indeks
+    """
+    exact_match = np.nonzero(np.isclose(cm, 0.0, atol=1e-6))[0]
+    if exact_match.size > 0:
+        idx = exact_match[0]
+        return alpha_range[idx], idx
+
+    sign_changes = np.nonzero(np.diff(np.sign(cm)) != 0)[0]
+    if sign_changes.size == 0:
+        return np.nan, -1
+
+    idx = sign_changes[0]
+    alpha_interp = np.interp(0.0, cm[idx:idx + 2], alpha_range[idx:idx + 2])
+    return alpha_interp, idx
+
+
+def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=0, sm_target=0.08, verbose=False):
+    """
+    Wykonuje wektoryzowaną analizę AeroBuildup i przygotowuje dane 
+    dla funkcji fitness w punkcie, gdzie Cm(alpha)=0 względem CG.
     """
     op = asb.OperatingPoint(
         velocity=velocity,
@@ -243,38 +263,76 @@ def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=
 
     CL = res["CL"]
     CD = res["CD"]
-    LD = numpy.where(CD != 0, CL / CD, 0)
-    # Znalezienie punktu pracy (Best L/D)
-    idx_best = numpy.nanargmax(LD)
-    
-    # 3. KOREKTA NA DOCELOWY ŚRODEK CIĘŻKOŚCI (CG)
-    # Wyciągamy dane dla punktu Best L/D
+    Cm = res["Cm"]
+    LD = numpy.where(CD != 0, CL / CD, np.nan)
+
     main_wing = airplane.wings[0]
     mac = main_wing.mean_aerodynamic_chord()
-    x_np = res["x_np"][idx_best]  # Położenie punktu neutralnego w tym punkcie pracy
+    x_np_array = res["x_np"] if isinstance(res["x_np"], np.ndarray) else np.full_like(alphas, res["x_np"], dtype=float)
+    x_cg_array = x_np_array - (sm_target * mac)
+    Cm_cg = Cm + CL * ((x_cg_array - xyz_ref_orig[0]) / mac)
+
+    alpha_trim, idx_from_trim = _find_alpha_for_cm_zero(alphas, Cm_cg)
+    alpha_in_range = np.isfinite(alpha_trim) and (-1.0 <= alpha_trim <= 4.0)
+
+    trim_fallback = False  # Flaga: czy użyliśmy fallback alpha=1.0
     
-    x_cg_target = x_np - (sm_target * mac)
-    
-    # Ramię siły (różnica między punktem analizy 0.19 a docelowym CG)
+    if np.isfinite(alpha_trim) and (-1.0 <= alpha_trim <= 4.0):
+        CL_trim = np.interp(alpha_trim, alphas, CL)
+        CD_trim = np.interp(alpha_trim, alphas, CD)
+        LD_trim = CL_trim / CD_trim if CD_trim != 0 else 0.0
+        Cma_trim = np.interp(alpha_trim, alphas, res["Cma"]) if isinstance(res["Cma"], np.ndarray) else res["Cma"]
+        Cnb_trim = np.interp(alpha_trim, alphas, res["Cnb"]) if isinstance(res["Cnb"], np.ndarray) else res["Cnb"]
+        Cmq_trim = np.interp(alpha_trim, alphas, res["Cmq"]) if isinstance(res["Cmq"], np.ndarray) else res["Cmq"]
+        Clp_trim = np.interp(alpha_trim, alphas, res["Clp"]) if isinstance(res["Clp"], np.ndarray) else res["Clp"]
+        Cnr_trim = np.interp(alpha_trim, alphas, res["Cnr"]) if isinstance(res["Cnr"], np.ndarray) else res["Cnr"]
+        x_np_trim = np.interp(alpha_trim, alphas, res["x_np"]) if isinstance(res["x_np"], np.ndarray) else res["x_np"]
+        
+        # Jeśli interpolacja wyprodukowała punkt między dwoma indeksami, użyj tego pomiędzy
+        if idx_from_trim >= 0:
+            idx_best = idx_from_trim
+        else:
+            idx_best = np.argmin(np.abs(alphas - alpha_trim))
+    else:
+        # FALLBACK: użyj alpha=1.0 i ustaw flagę kary
+        trim_fallback = True
+        alpha_trim = 1.0
+        alpha_in_range = False  # Z definicji fallback jest poza normalnym zakresem
+        
+        # Interpoluj wszystkie parametry dla alpha=1.0
+        CL_trim = np.interp(alpha_trim, alphas, CL)
+        CD_trim = np.interp(alpha_trim, alphas, CD)
+        LD_trim = CL_trim / CD_trim if CD_trim != 0 else 0.0
+        Cma_trim = np.interp(alpha_trim, alphas, res["Cma"]) if isinstance(res["Cma"], np.ndarray) else res["Cma"]
+        Cnb_trim = np.interp(alpha_trim, alphas, res["Cnb"]) if isinstance(res["Cnb"], np.ndarray) else res["Cnb"]
+        Cmq_trim = np.interp(alpha_trim, alphas, res["Cmq"]) if isinstance(res["Cmq"], np.ndarray) else res["Cmq"]
+        Clp_trim = np.interp(alpha_trim, alphas, res["Clp"]) if isinstance(res["Clp"], np.ndarray) else res["Clp"]
+        Cnr_trim = np.interp(alpha_trim, alphas, res["Cnr"]) if isinstance(res["Cnr"], np.ndarray) else res["Cnr"]
+        x_np_trim = np.interp(alpha_trim, alphas, res["x_np"]) if isinstance(res["x_np"], np.ndarray) else res["x_np"]
+        
+        # Znajdź indeks dla alpha=1.0
+        idx_best = np.argmin(np.abs(alphas - 1.0))
+
+    x_cg_target = x_np_trim - (sm_target * mac)
+
+    if trim_fallback:
+        cm_cg_trim = np.interp(alpha_trim, alphas, Cm_cg) if isinstance(Cm_cg, np.ndarray) else Cm_cg
+    else:
+        cm_cg_trim = 0.0
+
+    if verbose:
+        print(f"[GA_aerodynamics] x_cg_target = {x_cg_target:.4f} m, alpha_trim = {alpha_trim:.3f} deg, x_ref = {xyz_ref_orig[0]:.4f} m")
+
     dx_bar = (x_cg_target - xyz_ref_orig[0]) / mac
-    
-    # 4. Przeliczanie momentów i pochodnych na x_cg_target
-    # Korekta Cm (moment trymujący)
-    cm_trimmed = res["Cm"][idx_best] + CL[idx_best] * dx_bar
-    
-    # Korekta Cma (stateczność podłużna)
-    cma_trimmed = res["Cma"][idx_best] + res["CLa"][idx_best] * dx_bar
-    
-    # Korekta Cnb (stateczność kierunkowa)
-    # Cnb = Cnb_ref - CYb * dx_bar (CYb jest ujemne, więc przesunięcie CG w przód zwiększa stabilność)
-    cnb_trimmed = res["Cnb"][idx_best] - res["CYb"][idx_best] * dx_bar
 
-    # Korekta Cnr (tłumienie odchylania) - również zależy od ramienia
-    cnr_trimmed = res["Cnr"][idx_best] + res["CYr"][idx_best] * dx_bar
+    cnb_trimmed = Cnb_trim - (res["CYb"][idx_best] if isinstance(res["CYb"], np.ndarray) else res["CYb"]) * dx_bar
+    cnr_trimmed = Cnr_trim + (res["CYr"][idx_best] if isinstance(res["CYr"], np.ndarray) else res["CYr"]) * dx_bar
 
-    
-    mask = (CL > -0.2) & (CL < 0.8)  
-    k, _ = np.polyfit(CL[mask]**2, CD[mask], 1)
+    mask = (CL > -0.2) & (CL < 0.8)
+    if np.any(mask):
+        k, _ = np.polyfit(CL[mask]**2, CD[mask], 1)
+    else:
+        k = 1.0
 
     span = main_wing.span()
     AR = main_wing.aspect_ratio()
@@ -284,95 +342,161 @@ def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=
     e = 1 / (np.pi * ar_eff * k)
 
     data_for_fitness = {
-        'ld':      LD[idx_best],
-        'cm_cg':   cm_trimmed,
-        'cma':     cma_trimmed,
+        'ld':      LD_trim,
+        'cl':      CL_trim,
+        'cd':      CD_trim,
+        'cm_cg':   float(cm_cg_trim),
+        'cma':     Cma_trim,
         'cnb':     cnb_trimmed,
         'oswald':  e,
-        'cmq':     res['Cmq'][idx_best], # Tłumienie pitch (mała korekta pomijana dla uproszczenia)
-        'clp':     res['Clp'][idx_best], # Tłumienie roll (nie zależy od X_cg)
-        'cnr':     cnr_trimmed,          # Tłumienie yaw (skorygowane)
-        'alpha':   alphas[idx_best]
+        'cmq':     Cmq_trim,
+        'clp':     Clp_trim,
+        'cnr':     cnr_trimmed,
+        'alpha':   alpha_trim,
+        'alpha_in_range': alpha_in_range,
+        'trim_fallback': trim_fallback,
+        'x_np':    x_np_trim,
+        'x_cg':    x_cg_target,
+        'x_cg_ref': xyz_ref_orig[0]
     }
 
     return data_for_fitness, x_cg_target
 
 
-def fitness_function_weighted(data):
+def _score_quadratic_clipped(x, offset, normalization, scale=100, max_clip=120):
+    """
+    Kvadratowa funkcja clipped: ((max(x - offset, 0) / norm)^2) * scale, clipped.
+    """
+    return float(np.clip((np.maximum(x - offset, 0) / normalization) ** 2 * scale, 0, max_clip))
+
+
+def _score_linear_clipped(x, x_min, x_max, scale=100, max_clip=100):
+    """
+    Liniowa funkcja clipped: ((x - x_min) / (x_max - x_min)) * scale, clipped.
+    """
+    return float(np.clip((x - x_min) / (x_max - x_min) * scale, 0, max_clip))
+
+
+def _score_sigmoid(x, k=1.0, x0=0.0, scale=100, max_clip=100):
+    """
+    Sigmoid: (1 / (1 + exp(-k * (x - x0)))) * scale, clipped.
+    """
+    sigmoid_val = 1.0 / (1.0 + np.exp(-k * (x - x0)))
+    return float(np.clip(sigmoid_val * scale, 0, max_clip))
+
+
+def _score_linear_damping(x, target=1.0, scale=100, max_clip=100):
+    """
+    Liniowa funkcja tłumienia: jeśli x > 0 zwróć 0 (niestabilne),
+    inaczej (|x| / target) * scale, clipped.
+    """
+    if x > 0:
+        return 0.0
+    return float(np.clip((abs(x) / target) * scale, 0, max_clip))
+
+
+def _score_binary_step(condition, true_val=100.0, false_val=0.0):
+    """
+    Binarna funkcja skokowa: zwraca true_val jeśli condition jest True, else false_val.
+    """
+    return true_val if condition else false_val
+
+
+def fitness_function_weighted(data, genes=None):
     """
     Oblicza ocenę samolotu (0-100 pkt).
     
     Argument 'data' musi być słownikiem zawierającym:
-    - ld (float): Doskonałość
-    - cm_cg (float): Moment trymujący przy założonym CG
+    - ld (float): Doskonałość przy alfa, gdzie Cm=0
     - cma, cnb (float): Pochodne stateczności statycznej
     - cmq, clp, cnr (float): Pochodne tłumienia dynamicznego
     - oswald (float): Współczynnik efektywności obrysu
+    - alpha (float): kąt natarcia, przy którym Cm=0
+    
+    Argument 'genes' (opcjonalny) zawiera geny dla dodatkowych kar geometrycznych.
     """
-    if data is None: return 0.0, 
+    if data is None:
+        return 0.0, {}
 
-    # --- KONFIGURACJA WAG (Suma = 1.0) ---
     weights = {
-        'w_ld':      0.40,  # Główny priorytet: osiągi
-        'w_trim':    0.15,  # Jakość trymowania (Cm_cg blisko 0)
-        'w_stab':    0.10,  # Stateczność statyczna (Cma, Cnb)
-        'w_d_pitch': 0.1,  # Tłumienie pochylania (Cmq)
-        'w_d_roll':  0.05,  # Tłumienie przechylania (Clp)
-        'w_d_yaw':   0.20,  # Tłumienie odchylania (Cnr - ważne dla wingletów)
-        'w_oswald':  0.10   # Eliptyczność (Oswald) - promuje smukłe skrzydła
+        'w_ld':      0.35,
+        'w_cma':     0.15,
+        'w_cnb':     0.10,
+        'w_d_pitch': 0.10,
+        'w_d_roll':  0.05,
+        'w_d_yaw':   0.10,
+        'w_oswald':  0.10,
+        'w_alpha':   0.05
     }
 
-    # 1. DOSKONAŁOŚĆ (0-120 pkt) - liniowe skalowanie względem celu 25
-    score_ld = np.clip((np.maximum(data['ld']-10,0) / 25) * 100, 0, 120)
+    score_ld = _score_quadratic_clipped(data['ld'], offset=10, normalization=25, scale=100, max_clip=120)
 
-    # 2. TRYM (0-100 pkt) - Gauss wokół Cm = 0
-    # Sigma 0.02 pozwala na nieco większą tolerancję przy mniejszej wadze
-    sigma_trim = 0.01
-    score_trim = np.exp(-(data['cm_cg']**2) / (2 * sigma_trim**2)) * 100
+    score_cma = _score_sigmoid(data['cma'], k=10, x0=-0.4, scale=100, max_clip=100)
 
-    # 3. STATECZNOŚĆ STATYCZNA (0-100 pkt)
-    f_cma = 1 / (1 + np.exp(10 * (data['cma'] + 0.4)))
-    f_cnb = 1 / (1 + np.exp(-50 * (data['cnb'] - 0.04)))
-    score_stab = (f_cma * 0.5 + f_cnb * 0.5) * 100
+    score_cnb = _score_sigmoid(data['cnb'], k=50, x0=0.04, scale=100, max_clip=100)
 
-    # 4. TŁUMIENIE DYNAMICZNE (Rozdzielone)
-    # Każde tłumienie musi być ujemne (ujemna wartość oznacza stabilność)
-    def calc_damp_score(val, target):
-        if val > 0: return 0.0  # Kara za niestabilność dynamiczną
-        return np.clip((abs(val) / target) * 100, 0, 100)
+    score_damp_pitch = _score_linear_damping(data['cmq'], target=4.0, scale=100, max_clip=100)
+    score_damp_roll = _score_linear_damping(data['clp'], target=1.0, scale=100, max_clip=100)
+    score_damp_yaw = _score_linear_damping(data['cnr'], target=0.5, scale=100, max_clip=100)
 
-    # Wartości targetowe są przybliżone dla typowych małych UAV:
-    score_damp_pitch = calc_damp_score(data['cmq'], 4.0)
-    score_damp_roll  = calc_damp_score(data['clp'], 1.0)
-    score_damp_yaw   = calc_damp_score(data['cnr'], 0.5)
+    # Przedłużona funkcja liniowa dla Oswald: daje ujemne punkty poniżej x_min
+    oswald = data['oswald']
+    x_min, x_max = 0.8, 1.05
+    scale = 100
+    max_clip = 100
+    
+    # Liniowa interpolacja bez dolnego clipu
+    if oswald >= x_max:
+        score_oswald = max_clip
+    else:
+        score_oswald = ((oswald - x_min) / (x_max - x_min)) * scale
+        # Górny clip
+        score_oswald = min(score_oswald, max_clip)
 
-    # 5. OSWALD (Bonusowy mnożnik końcowy lub waga)
-    # Traktujemy to jako modyfikator jakości osiągów
-    score_oswald = np.clip((data['oswald'] - 0.8) / 0.25 * 100, 0, 100)
-    # --- OBLICZENIE ŚREDNIEJ WAŻONEJ ---
+    score_alpha = _score_binary_step(data.get('alpha_in_range', False), true_val=100.0, false_val=0.0)
+
     final_score = (
         score_ld         * weights['w_ld'] +
-        score_trim       * weights['w_trim'] +
-        score_stab       * weights['w_stab'] +
+        score_cma        * weights['w_cma'] +
+        score_cnb       * weights['w_cnb'] +
         score_damp_pitch * weights['w_d_pitch'] +
         score_damp_roll  * weights['w_d_roll'] +
         score_damp_yaw   * weights['w_d_yaw'] +
-        score_oswald     * weights['w_oswald']
-    ) / sum(weights.values()) 
-    
+        score_oswald     * weights['w_oswald'] +
+        score_alpha      * weights['w_alpha']
+    ) / sum(weights.values())
+
     score_details = {
         'ld':     score_ld,
-        'trim': score_trim,
-        'stab': score_stab,
+        'cma':    score_cma,
+        'cnb':    score_cnb,
         'd_pitch':score_damp_pitch,
-        'd_roll':score_damp_roll,
-        'd_yaw':score_damp_yaw,
-        'oswald': score_oswald
+        'd_roll': score_damp_roll,
+        'd_yaw':  score_damp_yaw,
+        'oswald': score_oswald,
+        'alpha_in_range':  score_alpha,
+        'alpha': data['alpha']
     }
-    
-    # "Bezpiecznik" - jeśli samolot jest statycznie niestabilny, wynik drastycznie spada
-    if data['cma'] > 0 or data['cnb'] < 0:
+
+    # Kara za nieprawidłowy sweep (dodatni sweep angle)
+    sweep_penalty = 0.0
+    if genes is not None:
+        x_positions = [genes['x_root'], genes['x_brk1'], genes['x_brk2'], genes['x_tip']]
+        if not all(x_positions[i] <= x_positions[i+1] for i in range(len(x_positions)-1)):
+            sweep_penalty = 50.0  # Kara 50 punktów za nieprawidłowy sweep
+            final_score -= sweep_penalty
+
+    score_details['sweep_penalty'] = sweep_penalty
+
+    if not data.get('alpha_in_range', False):
+        final_score *= 0.1
+
+    if data['cma'] > -0.01 or data['cnb'] < 0:
         final_score *= 0.15
+
+    if data.get('trim_fallback', False):
+        # Kara za fallback na alpha=1.0: zmniejszenie score o 50%
+        final_score *= 0.5
 
     return float(final_score), score_details
 

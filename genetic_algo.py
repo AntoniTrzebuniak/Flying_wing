@@ -4,6 +4,51 @@ from consts import TARGET_VELOCITY, AIRFOIL_DATABASE, HISTORIES_FOLDER
 import multiprocessing
 import json
 import datetime
+import threading
+import time
+import sys
+
+# Zmienne globalne dla trybu interaktywnego
+_interactive_stop = False
+_interactive_extend = 0
+
+def _interactive_input_thread():
+    """Wątek obsługujący interaktywny input bez blokowania głównego procesu."""
+    global _interactive_stop, _interactive_extend
+    
+    print("\n=== INTERAKTYWNY TRYB AKTYWNY ===")
+    print("Naciśnij 'q' aby przerwać po obecnej generacji")
+    print("Wpisz liczbę aby wydłużyć trening o tyle generacji")
+    print("Wpisz 'h' aby wyświetlić pomoc")
+    print("================================")
+    
+    while True:
+        try:
+            user_input = input().strip().lower()
+            
+            if user_input == 'q':
+                _interactive_stop = True
+                print("Przerwanie po obecnej generacji...")
+                break
+            elif user_input == 'h':
+                print("\n=== POMOC ===")
+                print("'q' - przerwanie po obecnej generacji")
+                print("liczba - wydłużenie treningu o tyle generacji")
+                print("'h' - ta pomoc")
+                print("============")
+            elif user_input.isdigit():
+                extend_by = int(user_input)
+                _interactive_extend += extend_by
+                print(f"Wydłużenie treningu o {extend_by} generacji (łącznie +{_interactive_extend})")
+            else:
+                print("Nieznana komenda. Wpisz 'h' dla pomocy.")
+                
+        except (EOFError, KeyboardInterrupt):
+            _interactive_stop = True
+            break
+        except Exception as e:
+            print(f"Błąd input: {e}")
+            continue
 
 
 def fitness_function(genes):
@@ -11,15 +56,12 @@ def fitness_function(genes):
     Funkcja celu dla algorytmu genetycznego.
     Buduje samolot, oblicza aerodynamikę i zwraca ocenę fitness oraz szczegóły składkowe.
     """
-    try:
-        airplane, total_mass = build_airplane_curved(genes, kind='linear')
-        alphas = np.linspace(-2, 15, 16)
-        data, x_cg_target = GA_aerodynamics(airplane, TARGET_VELOCITY, alphas)
-        score, score_details = fitness_function_weighted(data)
-        return score, score_details
-    except Exception as e:
-        print(f"Błąd w fitness_function: {e}")
-        return 0.0, {}  # Kara za błędy
+    
+    airplane, total_mass = build_airplane_curved(genes, kind='linear')
+    alphas = np.linspace(-5, 10, 30)
+    data, x_cg_target = GA_aerodynamics(airplane, TARGET_VELOCITY, alphas)
+    score, score_details = fitness_function_weighted(data, genes)
+    return score, score_details
 
 
 class GeneticAlgorithm:
@@ -50,7 +92,19 @@ class GeneticAlgorithm:
     def create_individual(self):
         return {k: np.random.uniform(v[0], v[1]) for k, v in self.bounds.items()}
 
-    def run_evolution(self, generations=100):
+    def run_evolution(self, generations=100, interactive=False):
+        global _interactive_stop, _interactive_extend
+        
+        # Resetuj flagi interaktywne
+        _interactive_stop = False
+        _interactive_extend = 0
+        
+        # Uruchom wątek interaktywny jeśli włączony
+        input_thread = None
+        if interactive:
+            input_thread = threading.Thread(target=_interactive_input_thread, daemon=True)
+            input_thread.start()
+        
         print("Creating population...")
         population = [self.create_individual() for _ in range(self.pop_size)]
         
@@ -62,10 +116,26 @@ class GeneticAlgorithm:
         score_details_history = []
         best_individuals_history = []
         
+        target_generations = generations
+        
         # Użyj multiprocessing do zrównoleglenia ewaluacji populacji
         with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
-            for gen in range(generations):
-                print(f"Generation {gen+1}/{generations}")
+            gen = 0
+            while gen < target_generations:
+                gen += 1
+                print(f"Generation {gen}/{target_generations}")
+                
+                # Sprawdź czy użytkownik chce przerwać
+                if _interactive_stop:
+                    print(f"Przerwano przez użytkownika po generacji {gen}")
+                    break
+                
+                # Sprawdź czy użytkownik chce wydłużyć
+                if _interactive_extend > 0:
+                    target_generations += _interactive_extend
+                    print(f"Wydłużono trening do {target_generations} generacji")
+                    _interactive_extend = 0
+                
                 # 1. Ewaluacja z zrównolegleniem
                 results = pool.map(fitness_function, population)
                 scores = np.array([r[0] for r in results])
@@ -107,7 +177,12 @@ class GeneticAlgorithm:
                     next_gen.append(child)
                     
                 population = next_gen
-                print(f"Gen {gen+1}: Best Score = {best_score:.4f}, Mean Score = {mean_score:.4f}")
+                print(f"Gen {gen}: Best Score = {best_score:.4f}, Mean Score = {mean_score:.4f}")
+        
+        # Zatrzymaj wątek interaktywny jeśli działa
+        if input_thread and input_thread.is_alive():
+            print("Zatrzymywanie wątku interaktywnego...")
+            # Wątek daemon sam się zatrzyma
         
         # Zapisz historię elity do JSON
         with open(HISTORIES_FOLDER / f'elites_history_{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.json', 'w') as f:
@@ -120,10 +195,12 @@ class GeneticAlgorithm:
                 'mean_scores_history': mean_scores_history,
                 'score_details_history': score_details_history,
                 'best_individuals_history': best_individuals_history,
-                'generations': generations,
+                'generations_completed': gen,
+                'target_generations': target_generations,
                 'pop_size': self.pop_size,
                 'elite_size': self.elite_size,
-                'bounds': self.bounds
+                'bounds': self.bounds,
+                'interactive_mode': interactive
             }, f, indent=4)
         
         print(f"\nOptymalizacja zakończona. Najlepszy wynik: {best_score:.4f}")
