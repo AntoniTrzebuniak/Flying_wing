@@ -1,5 +1,5 @@
 import numpy as np
-from solver import build_airplane_curved, GA_aerodynamics, fitness_function_weighted
+from solver import build_airplane_curved, GA_aerodynamics, fitness_function_weighted, get_cg
 from consts import TARGET_VELOCITY, AIRFOIL_DATABASE, HISTORIES_FOLDER
 import multiprocessing
 import json
@@ -56,10 +56,10 @@ def fitness_function(genes):
     Funkcja celu dla algorytmu genetycznego.
     Buduje samolot, oblicza aerodynamikę i zwraca ocenę fitness oraz szczegóły składkowe.
     """
-    
-    airplane, total_mass = build_airplane_curved(genes, kind='linear')
-    alphas = np.linspace(-5, 10, 30)
-    data, x_cg_target = GA_aerodynamics(airplane, TARGET_VELOCITY, alphas)
+    airplane, total_mass = build_airplane_curved(genes, kind='quadratic')
+    alphas = np.linspace(-5, 15, 30)
+    x_cg = get_cg(airplane, sm=0.1)
+    data, x_cg_target = GA_aerodynamics(airplane, TARGET_VELOCITY, alphas, xyz_ref_orig=[x_cg, 0, 0])
     score, score_details = fitness_function_weighted(data, genes)
     return score, score_details
 
@@ -70,23 +70,23 @@ class GeneticAlgorithm:
         self.elite_size = elite_size
         self.bounds = {
             # Zmienne punkty Y
-            'y_root': (0, 0.2),
-            'y_break1_f': (0.2, 0.7), 'y_break2_f': (0.3, 0.7), 'y_tip_f': (0.71, 0.95),
+            'y_root': (0.06, 0.2),
+            'y_break1_f': (0.2, 0.6), 'y_break2_f': (0.3, 0.7), 'y_tip_f': (0.71, 0.95),
             # Cięciwa
-            'c_root': (0.2, 0.4), 'c_brk1': (0.09, 0.35), 'c_brk2': (0.05, 0.3), 'c_tip': (0.03, 0.25),
+            'c_root': (0.25, 0.4), 'c_brk1': (0.15, 0.25), 'c_brk2': (0.08, 0.15), 'c_tip': (0.03, 0.08),
             # Skręcenie
             't_root': (-1.0, 1.0), 't_brk1': (-2, 2), 't_brk2': (-2, 3), 't_tip': (-5, 5),
             # Pozycja X (sweep)
-            'x_root': (0, 0.24), 'x_brk1': (0, 0.7), 'x_brk2': (0.1, 0.99), 'x_tip': (0.2, 1), 
+            'x_root': (0, 0.24), 'x_brk1': (0, 0.35), 'x_brk2': (0.1, 0.4), 'x_tip': (0.2, 0.45), 
             # Pozycja Z (dihedral)
-            'z_root': (-0.03, 0.1), 'z_brk1': (-0.06, 0.15), 'z_brk2': (-0.03, 0.24), 'z_tip': (0, 0.25), 
+            'z_root': (0, 0), 'z_brk1': (0, 0), 'z_brk2': (0,0), 'z_tip': (0, 0), 
             # Winglet
-            'winglet_target_angle': (45, 90),
-            'h_w': (0.01, 0.15), 'R_w': (0.02, 0.1), 'c_w_end': (0.01, 0.09),
-            'sweep_w': (0, 0.3), 'toe': (-5, 5),
+            'winglet_target_angle': (60, 90),
+            'h_w': (0.01, 0.15), 'R_w': (0.001, 0.1), 'c_w_end': (0.01, 0.09),
+            'sweep_w': (0, 0.1), 'toe': (-3, 3),
             # Profile (indeksy do AIRFOIL_DATABASE)
-            'id_root': (0, len(AIRFOIL_DATABASE)-1), 'id_brk1': (0, len(AIRFOIL_DATABASE)-1),
-            'id_tip': (0, len(AIRFOIL_DATABASE)-1), 'id_w': (0, len(AIRFOIL_DATABASE)-1)
+            'id_root': (0, len(AIRFOIL_DATABASE)-1), 'id_brk1': (0, len(AIRFOIL_DATABASE)-1), 'id_brk2': (0, len(AIRFOIL_DATABASE)-1),
+            'id_tip': (0, len(AIRFOIL_DATABASE)-1), 'id_w': (0, len(AIRFOIL_DATABASE))
         }
 
     def create_individual(self):

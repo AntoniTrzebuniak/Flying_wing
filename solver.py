@@ -16,7 +16,7 @@ def build_airplane_curved(genes, kind='quadratic'):
     """
     # Stałe dla profilu bazowego (na środku w y=0)
     y_base = 0
-    c_base = 0.4
+    c_base = 0.35
     t_base = 0
     x_base = 0
     z_base = 0
@@ -45,7 +45,7 @@ def build_airplane_curved(genes, kind='quadratic'):
     sections = []
     
     # Pobieramy profile obiektowe (4 profile przejściowe)
-    af_base = AIRFOIL_DATABASE[int(genes['id_root'])]  # base używa tego samego profilu co root
+    af_base = AIRFOIL_DATABASE[int(5)]  # bumblebee fuselage 178
     af_root = AIRFOIL_DATABASE[int(genes['id_root'])]
     af_brk1 = AIRFOIL_DATABASE[int(genes['id_brk1'])]
     af_brk2 = AIRFOIL_DATABASE[int(genes['id_brk1'])]  # brk2 używa tego samego profilu co brk1
@@ -141,88 +141,6 @@ def build_airplane_curved(genes, kind='quadratic'):
 
 
 
-def build_airplane(genes):
-    # 1. Dekodowanie geometrii podstawowej
-    y_root = genes['y_root']
-    y_break = y_root + genes['y_break_f'] * (B/2 - y_root)
-    y_tip = y_break + genes['y_tip_f'] * (B/2 - y_break)
-    
-    # 2. Kąty i Dihedral
-    dy = y_tip - y_break
-    dz = genes['z_tip'] - genes['z_brk']
-    wing_dihedral_rad = np.arctan2(dz, dy)
-    
-    target_angle_rad = np.radians(genes['winglet_target_angle'])
-    target_angle_rad = np.maximum(target_angle_rad, wing_dihedral_rad + np.radians(2))
-    
-    # 3. Parametryzacja łuku i wydłużenia
-    R_w = genes['R_w']
-    h_w = genes['h_w']
-    extension_len = np.maximum(0, h_w - R_w)
-    
-    # Definiujemy kroki dla łuku
-    num_arc_steps = 8
-    phi_arc = np.linspace(wing_dihedral_rad - np.pi/2, target_angle_rad - np.pi/2, num_arc_steps)
-    
-    # Środek łuku
-    cy = y_tip - R_w * np.cos(wing_dihedral_rad - np.pi/2)
-    cz = genes['z_tip'] - R_w * np.sin(wing_dihedral_rad - np.pi/2)
-    
-    # Współrzędne Y i Z dla łuku
-    y_arc = cy + R_w * np.cos(phi_arc)
-    z_arc = cz + R_w * np.sin(phi_arc)
-    
-    # 4. Dodanie wydłużenia jako integralnej części wektora współrzędnych
-    if extension_len > 0:
-        # Kolejne stacje na prostej (np. 3 dodatkowe punkty dla gładkości wizualnej)
-        num_ext_steps = 4
-        dist_ext = np.linspace(0, extension_len, num_ext_steps)[1:] # [1:] bo 0 to koniec łuku
-        
-        y_ext = y_arc[-1] + dist_ext * np.cos(target_angle_rad)
-        z_ext = z_arc[-1] + dist_ext * np.sin(target_angle_rad)
-        
-        y_w_full = np.concatenate([y_arc, y_ext])
-        z_w_full = np.concatenate([z_arc, z_ext])
-    else:
-        y_w_full = y_arc
-        z_w_full = z_arc
-
-    # 5. Skos (X) i Cięciwa (Chord) rozłożone na CAŁEJ długości wingleta
-    # Obliczamy "długość" wingleta po krzywej, aby sweep był stały/liniowy
-    actual_steps = len(y_w_full)
-    
-    # Skos (X) narasta od x_tip do x_tip + sweep_w
-    x_w_full = genes['x_tip'] + np.linspace(0, genes['sweep_w'], actual_steps)
-    
-    # Cięciwa (Chord) maleje do c_w_end
-    c_w_full = np.linspace(genes['c_tip'], genes['c_w_end'], actual_steps)
-
-    # 6. Definicja stacji
-    sections = [
-        asb.WingXSec(xyz_le=[0, y_root, 0], chord=genes['c_root'], twist=genes['t_root'], 
-                     airfoil=AIRFOIL_DATABASE[int(genes['id_root'])]),
-        asb.WingXSec(xyz_le=[genes['x_brk'], y_break, genes['z_brk']], chord=genes['c_brk'], twist=genes['t_brk'], 
-                     airfoil=AIRFOIL_DATABASE[int(genes['id_brk'])]),
-        asb.WingXSec(xyz_le=[genes['x_tip'], y_tip, genes['z_tip']], chord=genes['c_tip'], twist=genes['t_tip'], 
-                     airfoil=AIRFOIL_DATABASE[int(genes['id_tip'])])
-    ]
-
-    # Dodanie wszystkich stacji wingleta (pomijamy indeks 0, bo to y_tip)
-    for i in range(1, actual_steps):
-        sections.append(
-            asb.WingXSec(
-                xyz_le=[x_w_full[i], y_w_full[i], z_w_full[i]], 
-                chord=c_w_full[i], 
-                twist=genes['t_tip'] - genes['toe'], 
-                airfoil=AIRFOIL_DATABASE[int(genes['id_w'])]
-            )
-        )
-
-    wing = asb.Wing(name="Main Wing", xsecs=sections, symmetric=True)
-    airplane = asb.Airplane(wings=[wing])
-    total_mass = FIXED_MASS + (wing.area() * WING_DENSITY)
-    
-    return airplane, total_mass
 
 
 import numpy as numpy
@@ -247,7 +165,64 @@ def _find_alpha_for_cm_zero(alpha_range, cm):
     return alpha_interp, idx
 
 
-def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=0, sm_target=0.08, verbose=False):
+def compute_cg_buildup(airplane, sm_percent=8.0, velocity=None):
+    """
+    Oblicza pozycję środka ciężkości (x_cg) dla zadanego zapasu stateczności (w procentach)
+    używając metody AeroBuildup do wyznaczenia punktu neutralnego (NP).
+
+    Args:
+        airplane: obiekt `Airplane`.
+        sm_percent: zapas stateczności w procentach (np. 8.0 dla 8%%).
+        velocity: prędkość używana do obliczeń (jeśli None używa TARGET_VELOCITY z consts).
+
+    Returns:
+        x_cg (float): pozycja środka ciężkości w tych samych jednostkach co geometria.
+    """
+    if velocity is None:
+        try:
+            velocity = TARGET_VELOCITY
+        except NameError:
+            raise ValueError("TARGET_VELOCITY not available; provide velocity argument")
+
+    # Base operating points to compute dCm/dCL
+    alpha_base = 2.0
+    alpha_step = 0.5
+
+    op_base = asb.OperatingPoint(velocity=velocity, alpha=alpha_base)
+    op_pert = asb.OperatingPoint(velocity=velocity, alpha=alpha_base + alpha_step)
+
+    ab = asb.AeroBuildup(airplane, op_base)
+    res1 = ab.run()
+
+    ab.op_point = op_pert
+    res2 = ab.run()
+
+    main_wing = airplane.wings[0]
+    mac = main_wing.mean_aerodynamic_chord()
+
+    dCL = res2['CL'] - res1['CL']
+    dCm = res2['Cm'] - res1['Cm']
+
+    # x_np relative to current xyz_ref
+    x_ref = airplane.xyz_ref[0]
+    x_np = x_ref - (dCm / dCL) * mac if dCL != 0 else x_ref
+
+    x_cg = x_np - (sm_percent / 100.0) * mac
+    # If arrays, take first element
+    if isinstance(x_cg, np.ndarray):
+        x_cg = float(x_cg[0])
+
+    return x_cg
+
+def get_cg(airplane, sm=0.1):
+    alpha_base = 2.0
+    op_base = asb.OperatingPoint(velocity=TARGET_VELOCITY, alpha=alpha_base)
+    ab = asb.AeroBuildup(airplane, op_base)
+    res1 = ab.run_with_stability_derivatives()
+    main_wing = airplane.wings[0]
+    return res1['x_np'] - sm * main_wing.mean_aerodynamic_chord()
+
+def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=0, verbose=False):
     """
     Wykonuje wektoryzowaną analizę AeroBuildup i przygotowuje dane 
     dla funkcji fitness w punkcie, gdzie Cm(alpha)=0 względem CG.
@@ -258,25 +233,21 @@ def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=
         beta=beta
     )
 
+    # Run AeroBuildup referenced to the provided xyz_ref (expected to be CG)
     ab = asb.AeroBuildup(airplane, op, xyz_ref=xyz_ref_orig)
     res = ab.run_with_stability_derivatives(alpha=True, beta=True, p=True, q=True, r=True)
 
     CL = res["CL"]
     CD = res["CD"]
     Cm = res["Cm"]
-    LD = numpy.where(CD != 0, CL / CD, np.nan)
 
     main_wing = airplane.wings[0]
-    mac = main_wing.mean_aerodynamic_chord()
-    x_np_array = res["x_np"] if isinstance(res["x_np"], np.ndarray) else np.full_like(alphas, res["x_np"], dtype=float)
-    x_cg_array = x_np_array - (sm_target * mac)
-    Cm_cg = Cm + CL * ((x_cg_array - xyz_ref_orig[0]) / mac)
 
-    alpha_trim, idx_from_trim = _find_alpha_for_cm_zero(alphas, Cm_cg)
+    # Find trim alpha where Cm (about the provided reference) is zero
+    alpha_trim, idx_from_trim = _find_alpha_for_cm_zero(alphas, Cm)
     alpha_in_range = np.isfinite(alpha_trim) and (-1.0 <= alpha_trim <= 4.0)
 
-    trim_fallback = False  # Flaga: czy użyliśmy fallback alpha=1.0
-    
+    trim_fallback = False
     if np.isfinite(alpha_trim) and (-1.0 <= alpha_trim <= 4.0):
         CL_trim = np.interp(alpha_trim, alphas, CL)
         CD_trim = np.interp(alpha_trim, alphas, CD)
@@ -287,19 +258,12 @@ def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=
         Clp_trim = np.interp(alpha_trim, alphas, res["Clp"]) if isinstance(res["Clp"], np.ndarray) else res["Clp"]
         Cnr_trim = np.interp(alpha_trim, alphas, res["Cnr"]) if isinstance(res["Cnr"], np.ndarray) else res["Cnr"]
         x_np_trim = np.interp(alpha_trim, alphas, res["x_np"]) if isinstance(res["x_np"], np.ndarray) else res["x_np"]
-        
-        # Jeśli interpolacja wyprodukowała punkt między dwoma indeksami, użyj tego pomiędzy
-        if idx_from_trim >= 0:
-            idx_best = idx_from_trim
-        else:
-            idx_best = np.argmin(np.abs(alphas - alpha_trim))
     else:
-        # FALLBACK: użyj alpha=1.0 i ustaw flagę kary
+        # fallback: use alpha=1.0
         trim_fallback = True
         alpha_trim = 1.0
-        alpha_in_range = False  # Z definicji fallback jest poza normalnym zakresem
-        
-        # Interpoluj wszystkie parametry dla alpha=1.0
+        alpha_in_range = False
+
         CL_trim = np.interp(alpha_trim, alphas, CL)
         CD_trim = np.interp(alpha_trim, alphas, CD)
         LD_trim = CL_trim / CD_trim if CD_trim != 0 else 0.0
@@ -309,37 +273,34 @@ def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=
         Clp_trim = np.interp(alpha_trim, alphas, res["Clp"]) if isinstance(res["Clp"], np.ndarray) else res["Clp"]
         Cnr_trim = np.interp(alpha_trim, alphas, res["Cnr"]) if isinstance(res["Cnr"], np.ndarray) else res["Cnr"]
         x_np_trim = np.interp(alpha_trim, alphas, res["x_np"]) if isinstance(res["x_np"], np.ndarray) else res["x_np"]
-        
-        # Znajdź indeks dla alpha=1.0
-        idx_best = np.argmin(np.abs(alphas - 1.0))
 
-    x_cg_target = x_np_trim - (sm_target * mac)
 
-    if trim_fallback:
-        cm_cg_trim = np.interp(alpha_trim, alphas, Cm_cg) if isinstance(Cm_cg, np.ndarray) else Cm_cg
-    else:
-        cm_cg_trim = 0.0
+    # Because AeroBuildup was run with xyz_ref set to the CG, Cm is already referenced to CG
+    cm_cg_trim = np.interp(alpha_trim, alphas, Cm) if trim_fallback else 0.0
 
     if verbose:
-        print(f"[GA_aerodynamics] x_cg_target = {x_cg_target:.4f} m, alpha_trim = {alpha_trim:.3f} deg, x_ref = {xyz_ref_orig[0]:.4f} m")
+        print(f"[GA_aerodynamics] trim alpha = {alpha_trim:.3f} deg, xyz_ref = {xyz_ref_orig[0]:.4f} m")
 
-    dx_bar = (x_cg_target - xyz_ref_orig[0]) / mac
-
-    cnb_trimmed = Cnb_trim - (res["CYb"][idx_best] if isinstance(res["CYb"], np.ndarray) else res["CYb"]) * dx_bar
-    cnr_trimmed = Cnr_trim + (res["CYr"][idx_best] if isinstance(res["CYr"], np.ndarray) else res["CYr"]) * dx_bar
+    # Do not apply additional corrections for shifted reference point — assume caller passed CG as xyz_ref
+    cnb_trimmed = Cnb_trim
+    cnr_trimmed = Cnr_trim
 
     mask = (CL > -0.2) & (CL < 0.8)
     if np.any(mask):
         k, _ = np.polyfit(CL[mask]**2, CD[mask], 1)
     else:
         k = 1.0
-
-    span = main_wing.span()
+    
+    #span = main_wing.span()
+    
+    #z_tip = main_wing.xsecs[-1].xyz_le[2]
+    #z_root = main_wing.xsecs[0].xyz_le[2]
+    # Rzeczywista wysokość wingletu to różnica między najwyższym punktem a tipem
+    #z_coords = [xsec.xyz_le[2] for xsec in main_wing.xsecs]
+    #h_winglet = max(0, np.max(z_coords) - z_tip) 
     AR = main_wing.aspect_ratio()
-    z_coords = [xsec.xyz_le[2] for xsec in main_wing.xsecs]
-    h_winglet = np.max(z_coords) - np.min(z_coords)
-    ar_eff = AR * (1 + 1.9 * (h_winglet / span))
-    e = 1 / (np.pi * ar_eff * k)
+    e = 1 / (np.pi * AR * k)
+    mass = main_wing.area() * WING_DENSITY
 
     data_for_fitness = {
         'ld':      LD_trim,
@@ -355,15 +316,16 @@ def GA_aerodynamics(airplane, velocity, alphas, xyz_ref_orig=[0.19, 0, 0], beta=
         'alpha':   alpha_trim,
         'alpha_in_range': alpha_in_range,
         'trim_fallback': trim_fallback,
+        'mass':    mass,
         'x_np':    x_np_trim,
-        'x_cg':    x_cg_target,
+        'x_cg':    xyz_ref_orig[0],
         'x_cg_ref': xyz_ref_orig[0]
     }
 
-    return data_for_fitness, x_cg_target
+    return data_for_fitness, xyz_ref_orig[0]
 
 
-def _score_quadratic_clipped(x, offset, normalization, scale=100, max_clip=120):
+def _score_quadratic_clipped(x, offset, normalization, scale=100, max_clip=100):
     """
     Kvadratowa funkcja clipped: ((max(x - offset, 0) / norm)^2) * scale, clipped.
     """
@@ -419,40 +381,27 @@ def fitness_function_weighted(data, genes=None):
         return 0.0, {}
 
     weights = {
-        'w_ld':      0.35,
+        'w_ld':      0.4,
         'w_cma':     0.15,
         'w_cnb':     0.10,
         'w_d_pitch': 0.10,
         'w_d_roll':  0.05,
         'w_d_yaw':   0.10,
-        'w_oswald':  0.10,
-        'w_alpha':   0.05
+        'w_oswald':  0.20,
+        'w_alpha':   0.05,
+        'w_mass':    0.22
     }
 
-    score_ld = _score_quadratic_clipped(data['ld'], offset=10, normalization=25, scale=100, max_clip=120)
-
+    score_ld = _score_quadratic_clipped(data['ld'], offset=0, normalization=35, scale=100, max_clip=100)
     score_cma = _score_sigmoid(data['cma'], k=10, x0=-0.4, scale=100, max_clip=100)
-
     score_cnb = _score_sigmoid(data['cnb'], k=50, x0=0.04, scale=100, max_clip=100)
-
     score_damp_pitch = _score_linear_damping(data['cmq'], target=4.0, scale=100, max_clip=100)
     score_damp_roll = _score_linear_damping(data['clp'], target=1.0, scale=100, max_clip=100)
     score_damp_yaw = _score_linear_damping(data['cnr'], target=0.5, scale=100, max_clip=100)
-
+    score_mass = _score_linear_clipped(data['mass'], x_min=100, x_max=500, scale=100, max_clip=100)
     # Przedłużona funkcja liniowa dla Oswald: daje ujemne punkty poniżej x_min
     oswald = data['oswald']
-    x_min, x_max = 0.8, 1.05
-    scale = 100
-    max_clip = 100
-    
-    # Liniowa interpolacja bez dolnego clipu
-    if oswald >= x_max:
-        score_oswald = max_clip
-    else:
-        score_oswald = ((oswald - x_min) / (x_max - x_min)) * scale
-        # Górny clip
-        score_oswald = min(score_oswald, max_clip)
-
+    score_oswald = _score_linear_clipped(oswald, x_min=0.8, x_max=1.05, scale=100, max_clip=100)
     score_alpha = _score_binary_step(data.get('alpha_in_range', False), true_val=100.0, false_val=0.0)
 
     final_score = (
@@ -463,7 +412,8 @@ def fitness_function_weighted(data, genes=None):
         score_damp_roll  * weights['w_d_roll'] +
         score_damp_yaw   * weights['w_d_yaw'] +
         score_oswald     * weights['w_oswald'] +
-        score_alpha      * weights['w_alpha']
+        score_alpha      * weights['w_alpha'] +
+        score_mass       * weights['w_mass']
     ) / sum(weights.values())
 
     score_details = {
@@ -475,7 +425,8 @@ def fitness_function_weighted(data, genes=None):
         'd_yaw':  score_damp_yaw,
         'oswald': score_oswald,
         'alpha_in_range':  score_alpha,
-        'alpha': data['alpha']
+        'alpha': data['alpha'],
+        'mass': score_mass
     }
 
     # Kara za nieprawidłowy sweep (dodatni sweep angle)
@@ -497,6 +448,23 @@ def fitness_function_weighted(data, genes=None):
     if data.get('trim_fallback', False):
         # Kara za fallback na alpha=1.0: zmniejszenie score o 50%
         final_score *= 0.5
+
+    geom_penalty = 0.0
+    if genes is not None:
+        # 1. Monotoniczny skos (Sweep) - X musi rosnąć w stronę końcówki
+        xs = [0.0, genes['x_root'], genes['x_brk1'], genes['x_brk2'], genes['x_tip']]
+        for i in range(len(xs)-1):
+            if xs[i+1] < xs[i]:
+                geom_penalty += 20.0 + (xs[i] - xs[i+1]) * 1000 # Kara proporcjonalna do błędu
+
+        # 2. Monotoniczna cięciwa (Taper) - C musi maleć (lub być równe)
+        cs = [0.4, genes['c_root'], genes['c_brk1'], genes['c_brk2'], genes['c_tip']]
+        for i in range(len(cs)-1):
+            if cs[i+1] > cs[i]:
+                geom_penalty += 20.0 + (cs[i+1] - cs[i]) * 1000
+
+    final_score -= geom_penalty
+    score_details['geom_penalty'] = geom_penalty
 
     return float(final_score), score_details
 
@@ -607,8 +575,9 @@ def calculate_extra_metrics(airplane, total_mass, velocity):
     # Winglety zwiększają efektywną rozpiętość bez fizycznego jej zwiększania.
     # Uproszczony model: AR_eff = AR * (1 + 1.9 * (h_winglet / span))
     # Wyciągamy wysokość wingletu z różnicy Z stacji
+    z_tip = wing.xsecs[-1].xyz_le[2]
     z_coords = [xsec.xyz_le[2] for xsec in wing.xsecs]
-    h_winglet = np.max(z_coords) - np.min(z_coords)
+    h_winglet = max(0, np.max(z_coords) - z_tip)
     ar_eff = ar * (1 + 1.9 * (h_winglet / span))
     
     # 4. Średnia Cięciwa Aerodynamiczna (MAC)
@@ -719,10 +688,21 @@ def analyze_alpha_sweep_and_plot(
     # --- Oswald efficiency z polary ---
     try:
         mask = (CL > -0.2) & (CL < 0.8)  # zakres liniowy
-        k, _ = np.polyfit(CL[mask]**2, CD[mask], 1)
-
-        AR = airplane.wings[0].aspect_ratio()
-        e = 1 / (np.pi * AR * k)
+        if np.sum(mask) >= 2:
+            k, _ = np.polyfit(CL[mask]**2, CD[mask], 1)
+            
+            main_wing = airplane.wings[0]
+            span = main_wing.span()
+            AR = main_wing.aspect_ratio()
+            
+            # Obliczanie efektywnego wydłużenia z uwzględnieniem wingletu
+            z_coords = [xsec.xyz_le[2] for xsec in main_wing.xsecs]
+            h_winglet = np.max(z_coords) - np.min(z_coords)
+            ar_eff = AR * (1 + 1.9 * (h_winglet / span))
+            
+            e = 1 / (np.pi * ar_eff * k)
+        else:
+            e = np.nan
     except:
         print("Error occurred while calculating Oswald efficiency.")
         e = np.nan
@@ -1204,3 +1184,86 @@ def solve_aerodynamics(genes):
     except:
         return None
 
+@DeprecationWarning
+def build_airplane(genes):
+    # 1. Dekodowanie geometrii podstawowej
+    y_root = genes['y_root']
+    y_break = y_root + genes['y_break_f'] * (B/2 - y_root)
+    y_tip = y_break + genes['y_tip_f'] * (B/2 - y_break)
+    
+    # 2. Kąty i Dihedral
+    dy = y_tip - y_break
+    dz = genes['z_tip'] - genes['z_brk']
+    wing_dihedral_rad = np.arctan2(dz, dy)
+    
+    target_angle_rad = np.radians(genes['winglet_target_angle'])
+    target_angle_rad = np.maximum(target_angle_rad, wing_dihedral_rad + np.radians(2))
+    
+    # 3. Parametryzacja łuku i wydłużenia
+    R_w = genes['R_w']
+    h_w = genes['h_w']
+    extension_len = np.maximum(0, h_w - R_w)
+    
+    # Definiujemy kroki dla łuku
+    num_arc_steps = 8
+    phi_arc = np.linspace(wing_dihedral_rad - np.pi/2, target_angle_rad - np.pi/2, num_arc_steps)
+    
+    # Środek łuku
+    cy = y_tip - R_w * np.cos(wing_dihedral_rad - np.pi/2)
+    cz = genes['z_tip'] - R_w * np.sin(wing_dihedral_rad - np.pi/2)
+    
+    # Współrzędne Y i Z dla łuku
+    y_arc = cy + R_w * np.cos(phi_arc)
+    z_arc = cz + R_w * np.sin(phi_arc)
+    
+    # 4. Dodanie wydłużenia jako integralnej części wektora współrzędnych
+    if extension_len > 0:
+        # Kolejne stacje na prostej (np. 3 dodatkowe punkty dla gładkości wizualnej)
+        num_ext_steps = 4
+        dist_ext = np.linspace(0, extension_len, num_ext_steps)[1:] # [1:] bo 0 to koniec łuku
+        
+        y_ext = y_arc[-1] + dist_ext * np.cos(target_angle_rad)
+        z_ext = z_arc[-1] + dist_ext * np.sin(target_angle_rad)
+        
+        y_w_full = np.concatenate([y_arc, y_ext])
+        z_w_full = np.concatenate([z_arc, z_ext])
+    else:
+        y_w_full = y_arc
+        z_w_full = z_arc
+
+    # 5. Skos (X) i Cięciwa (Chord) rozłożone na CAŁEJ długości wingleta
+    # Obliczamy "długość" wingleta po krzywej, aby sweep był stały/liniowy
+    actual_steps = len(y_w_full)
+    
+    # Skos (X) narasta od x_tip do x_tip + sweep_w
+    x_w_full = genes['x_tip'] + np.linspace(0, genes['sweep_w'], actual_steps)
+    
+    # Cięciwa (Chord) maleje do c_w_end
+    c_w_full = np.linspace(genes['c_tip'], genes['c_w_end'], actual_steps)
+
+    # 6. Definicja stacji
+    sections = [
+        asb.WingXSec(xyz_le=[0, y_root, 0], chord=genes['c_root'], twist=genes['t_root'], 
+                     airfoil=AIRFOIL_DATABASE[int(genes['id_root'])]),
+        asb.WingXSec(xyz_le=[genes['x_brk'], y_break, genes['z_brk']], chord=genes['c_brk'], twist=genes['t_brk'], 
+                     airfoil=AIRFOIL_DATABASE[int(genes['id_brk'])]),
+        asb.WingXSec(xyz_le=[genes['x_tip'], y_tip, genes['z_tip']], chord=genes['c_tip'], twist=genes['t_tip'], 
+                     airfoil=AIRFOIL_DATABASE[int(genes['id_tip'])])
+    ]
+
+    # Dodanie wszystkich stacji wingleta (pomijamy indeks 0, bo to y_tip)
+    for i in range(1, actual_steps):
+        sections.append(
+            asb.WingXSec(
+                xyz_le=[x_w_full[i], y_w_full[i], z_w_full[i]], 
+                chord=c_w_full[i], 
+                twist=genes['t_tip'] - genes['toe'], 
+                airfoil=AIRFOIL_DATABASE[int(genes['id_w'])]
+            )
+        )
+
+    wing = asb.Wing(name="Main Wing", xsecs=sections, symmetric=True)
+    airplane = asb.Airplane(wings=[wing])
+    total_mass = FIXED_MASS + (wing.area() * WING_DENSITY)
+    
+    return airplane, total_mass

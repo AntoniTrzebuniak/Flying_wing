@@ -2,10 +2,10 @@ from pathlib import Path
 import aerosandbox as asb
 # --- PARAMETRY GLOBALNE ---
 B = 1.2                 # Rozpiętość całkowita [m]
-TARGET_VELOCITY = 15.0  # Prędkość przelotowa [m/s]
+TARGET_VELOCITY = 20.0  # Prędkość przelotowa [m/s]
 FIXED_MASS = 0.4        # Masa elektroniki i baterii [kg]
 TOTAL_MASS = 1.0        # Docelowa masa całkowita [kg]
-WING_DENSITY = 1.2      # Masa struktury skrzydła [kg/m2]
+WING_DENSITY = 2      # Masa struktury skrzydła [kg/m2]
 AIRFOIL_FOLDER = Path("./airfoils/") # Folder z plikami .dat
 
 # --- FOLDERY DO ZAPISYWANIA PLIKÓW ---

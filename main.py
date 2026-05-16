@@ -7,10 +7,10 @@ from consts import BEST_SOLUTIONS_FOLDER
 
 def main(interactive=False):
     # Inicjalizacja algorytmu genetycznego
-    ga = GeneticAlgorithm(pop_size=80, elite_size=6)
+    ga = GeneticAlgorithm(pop_size=80, elite_size=5)
     
     # Uruchomienie ewolucji
-    best_individual, best_score = ga.run_evolution(generations=30, interactive=interactive)
+    best_individual, best_score = ga.run_evolution(generations=40, interactive=interactive)
     
     # Zapisanie najlepszych genów do pliku
     with open(BEST_SOLUTIONS_FOLDER / f'best_solution_{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.json', 'w') as f:
